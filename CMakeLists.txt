@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+Ôªøcmake_minimum_required(VERSION 3.15)
 project(McUpdaterServer)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -9,13 +9,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+add_compile_definitions(UNICODE_UNICODE)
+
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_compile_options(/MT$<$<CONFIG:Debug>:d>)
+    add_compile_options(
+        /source-charset:utf-8
+        /execution-charset:utf-8)
 endif()
 
 set(SOURCE_DIR ${CMAKE_SOURCE_DIR}/Source/src)
-include_directories(Source/include)
+set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/Source/include)
 
 include_directories(${INCLUDE_DIR})
 
@@ -30,12 +35,13 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 
-# –ﬁ∏ƒJsonCppµƒ≤È’“∑Ω Ω
+# Êü•ÊâæJsonCpp
 find_package(jsoncpp REQUIRED)
 if(TARGET jsoncpp_lib)
     set(JSONCPP_LIBRARIES jsoncpp_lib)
+elseif(TARGET jsoncpp_static)
+    set(JSONCPP_LIBRARIES jsoncpp_static)
 else()
-    # ≥¢ ‘∆‰À˚≥£º˚µƒƒø±Í√˚
     find_library(JSONCPP_LIBRARY NAMES jsoncpp)
     if(JSONCPP_LIBRARY)
         set(JSONCPP_LIBRARIES ${JSONCPP_LIBRARY})
@@ -48,20 +54,15 @@ else()
     endif()
 endif()
 
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(LIBZIP libzip)
-endif()
-
-if(NOT LIBZIP_FOUND)
-    find_path(LIBZIP_INCLUDE_DIR zip.h)
-    find_library(LIBZIP_LIBRARY NAMES zip)
-    if(LIBZIP_INCLUDE_DIR AND LIBZIP_LIBRARY)
-        set(LIBZIP_FOUND TRUE)
-        set(LIBZIP_INCLUDE_DIRS ${LIBZIP_INCLUDE_DIR})
-        set(LIBZIP_LIBRARIES ${LIBZIP_LIBRARY})
-    else()
-        message(FATAL_ERROR "libzip not found")
-    endif()
+# Êü•Êâælibzip
+find_path(LIBZIP_INCLUDE_DIR zip.h)
+find_library(LIBZIP_LIBRARY NAMES zip)
+if(LIBZIP_INCLUDE_DIR AND LIBZIP_LIBRARY)
+    set(LIBZIP_FOUND TRUE)
+    set(LIBZIP_INCLUDE_DIRS ${LIBZIP_INCLUDE_DIR})
+    set(LIBZIP_LIBRARIES ${LIBZIP_LIBRARY})
+else()
+    message(FATAL_ERROR "libzip not found")
 endif()
 
 find_package(BZip2 REQUIRED)
@@ -73,38 +74,43 @@ include_directories(
     ${CROW_INCLUDE_DIRS}
     ${ASIO_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
+    ${JSONCPP_INCLUDE_DIRS}
     ${LIBZIP_INCLUDE_DIRS}
-    ${JSONCPP_INCLUDE_DIRS}  # ÃÌº”JsonCpp∞¸∫¨ƒø¬º
+    ${BZIP2_INCLUDE_DIRS}
 )
 
 if(WIN32)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    add_compile_options(/W4)
-    add_compile_options(/wd4996 /wd4267 /wd4244)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT")
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _SCL_SECURE_NO_WARNINGS)
+    add_compile_options(/W4 /wd4996 /wd4267 /wd4244 /wd4100)
 endif()
 
-if(UNIX AND NOT APPLE)
-    add_compile_options(-Wall -Wextra)
-elseif(APPLE)
-    add_compile_options(-Wall -Wextra -Wno-deprecated-declarations)
-endif()
-
-add_executable(McUpdaterServer
+# Ê∫êÊñá‰ª∂ÂàóË°® - Á°Æ‰øùÂåÖÂê´ÊâÄÊúâ.cppÊñá‰ª∂
+# Êõ¥Êñ∞Ê∫êÊñá‰ª∂ÂàóË°®
+# Êõ¥Êñ∞Ê∫êÊñá‰ª∂ÂàóË°®
+set(SOURCES
     ${SOURCE_DIR}/main.cpp
-    ${SOURCE_DIR}/ZipManager.cpp
-    ${SOURCE_DIR}/UpdateApiGenerator.cpp
-    ${SOURCE_DIR}/ConfigManager.cpp
-    ${SOURCE_DIR}/FileScanner.cpp
-    ${SOURCE_DIR}/FileHasher.cpp
-    ${SOURCE_DIR}/logger.cpp
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 )
 
+add_executable(McUpdaterServer ${SOURCES}        "Source/include/Language.h" "Source/include/Config.h" "Source/src/Config.cpp" "Source/include/FileScanner.h" "Source/src/FileScanner.cpp" "Source/include/DiffEngine.h" "Source/src/DiffEngine.cpp" "Source/include/PackageBuilder.h" "Source/src/PackageBuilder.cpp" "Source/include/VersionManager.h" "Source/src/VersionManager.cpp" "Source/include/WebServer.h" "Source/src/WebServer.cpp" "Source/include/UpdateGenerator.h" "Source/src/UpdateGenerator.cpp" "Source/src/Language.cpp"   "Source/include/Logger.h" "Source/src/Logger.cpp")
+
+# ÈìæÊé•Â∫ì
 target_link_libraries(McUpdaterServer
     ${CURL_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
-    ${JSONCPP_LIBRARIES}  # ¡¥Ω”JsonCppø‚
+    ${JSONCPP_LIBRARIES}
     ${LIBZIP_LIBRARIES}
     ${BZIP2_LIBRARIES}
     ${CROW_LIBRARIES}
@@ -123,25 +129,23 @@ if(WIN32)
     )
 endif()
 
-if(APPLE)
-    find_library(CORE_FOUNDATION CoreFoundation)
-    find_library(SECURITY Security)
-    target_link_libraries(McUpdaterServer 
-        ${CORE_FOUNDATION} 
-        ${SECURITY}
-    )
-endif()
-
+# ÂàõÂª∫ÂøÖË¶ÅÁöÑÁõÆÂΩï
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/config)
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/logs)
-file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/cache)  # ÃÌº”ª∫¥Êƒø¬º
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/cache)
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/public)
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/archives)
 
 add_custom_command(TARGET McUpdaterServer POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory 
-    ${CMAKE_SOURCE_DIR}/config
-    COMMAND ${CMAKE_COMMAND} -E make_directory 
-    ${CMAKE_SOURCE_DIR}/logs
-    COMMAND ${CMAKE_COMMAND} -E make_directory 
-    ${CMAKE_SOURCE_DIR}/cache
-    COMMENT "Creating config, logs and cache directories"
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/config
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/logs
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/cache
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/public
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/archives
+    COMMENT "Creating necessary directories"
 )
+
+if(WIN32)
+    add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
+    add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+endif()

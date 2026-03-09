@@ -1,35 +1,86 @@
-#ifndef FILESCANNER_H
+﻿#ifndef FILESCANNER_H
 #define FILESCANNER_H
 
 #include <string>
-#include <json/value.h>
-#include <filesystem>
+#include <vector>
 #include <unordered_map>
+#include <filesystem>
+#include <json/json.h>
+
+struct FileInfo {
+    std::string path;
+    std::string hash;
+    uint64_t size = 0;
+    bool isDirectory = false;
+    std::time_t modifiedTime = 0;
+
+    // 用于比较
+	//FIXEME: 简化的实现，以后可能需要改
+    bool operator==(const FileInfo& other) const {
+        return path==other.path&&hash==other.hash;
+    }
+
+    Json::Value ToJson() const {
+        Json::Value json;
+        json["path"]=path;
+        json["hash"]=hash;
+        json["size"]=static_cast<Json::Int64>(size);
+        json["is_directory"]=isDirectory;
+        json["modified_time"]=static_cast<Json::Int64>(modifiedTime);
+        return json;
+    }
+};
+//OPTIMIZE:FileScannercpp好像也维护了这个东西（files），会浪费内存
+struct DirectoryInfo {
+    std::string path;
+    std::vector<FileInfo> files;
+    std::vector<std::string> subdirectories;
+
+    Json::Value ToJson() const {
+        Json::Value json;
+        json["path"]=path;
+
+        Json::Value filesJson(Json::arrayValue);
+        for(const auto& file:files) {
+            filesJson.append(file.ToJson());
+        }
+        json["files"]=filesJson;
+
+        Json::Value dirsJson(Json::arrayValue);
+        for(const auto& dir:subdirectories) {
+            dirsJson.append(dir);
+        }
+        json["subdirectories"]=dirsJson;
+
+        return json;
+    }
+};
 
 class FileScanner {
-private:
-    std::string publicDir;
-    std::string deleteListDir;
-    std::string hashCacheFile;
-    std::unordered_map<std::string,std::string> dirHashCache;
-
-    void ScanDirectory(const std::filesystem::path& dirPath,const std::string& relativePath,
-        Json::Value& files,Json::Value& directories,
-        const std::string& baseUrl,const std::string& hashAlgorithm);
-
-    std::string CalculateDirectoryContentHash(const std::filesystem::path& dirPath,
-        const std::string& hashAlgorithm);
-
-    bool LoadHashCache();
-    bool SaveHashCache();
-
 public:
-    FileScanner(const std::string& publicDir,const std::string& deleteListDir);
+    FileScanner(const std::string& workspace,const std::string& hashAlgorithm="sha256");
 
-    void SetHashCacheFile(const std::string& cacheFile);
+    bool Scan();
+    const std::vector<FileInfo>& GetFiles() const { return files; }
+    const std::vector<DirectoryInfo>& GetDirectories() const { return directories; }
 
-    Json::Value ScanFiles(const std::string& baseUrl,const std::string& hashAlgorithm);
-    Json::Value GenerateDeleteList();
+    // 计算文件哈希
+    static std::string CalculateFileHash(const std::string& filePath,const std::string& algorithm);
+
+    // 从JSON加载文件列表
+    bool LoadFromJson(const Json::Value& json);
+
+    // 转换为JSON
+    Json::Value ToJson() const;
+
+private:
+    std::string workspace;
+    std::string hashAlgorithm;
+    std::vector<FileInfo> files;
+    std::vector<DirectoryInfo> directories;
+
+    void ScanDirectory(const std::filesystem::path& currentPath,const std::string& relativePath="");
+    std::string NormalizePath(const std::string& path) const;
 };
 
 #endif

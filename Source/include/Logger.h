@@ -1,4 +1,4 @@
-#ifndef LOGGER_H
+﻿#ifndef LOGGER_H
 #define LOGGER_H
 
 #include <iostream>
@@ -12,8 +12,8 @@ class Logger {
 private:
     std::ofstream logFile;
     std::string logFileName;
-    bool enabled;
-    bool isNewLine;
+    bool enabled = false;
+    bool isNewLine= true;
 
 public:
     Logger();
@@ -21,7 +21,7 @@ public:
 
     bool Initialize(const std::string& filename);
     void Enable(bool enable);
-
+	//FIXME: logFile.flush();太频繁
     template<typename T>
     Logger& operator<<(const T& message) {
         std::ostringstream oss;
@@ -43,13 +43,13 @@ public:
 
         return *this;
     }
-
+	//FIXME: 若无意中拷贝，可能导致两个实例操作同一文件流，引发冲突。
     Logger& operator<<(std::ostream& (*manip)(std::ostream&)) {
         if(enabled&&logFile.is_open()) {
             manip(logFile);
             logFile.flush();
         }
-
+		//FIXME:未处理 \n 作为新行标记
         if(manip==static_cast<std::ostream&(*)(std::ostream&)>(std::endl)) {
             isNewLine=true;
         }

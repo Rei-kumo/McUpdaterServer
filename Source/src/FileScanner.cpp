@@ -1,291 +1,288 @@
-#include "FileScanner.h"
-#include <filesystem>
+ï»¿#include "FileScanner.h"
+#include "Language.h"
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <iostream>
-#include <algorithm>
-#include "FileHasher.h"
+#include <openssl/sha.h>
+#include <openssl/md5.h>
+#include <filesystem>
+#include <chrono>
 #include "Logger.h"
-#include "ZipManager.h"
-#include <json/json.h>
 
-namespace fs=std::filesystem;
-
-FileScanner::FileScanner(const std::string& publicDir,const std::string& deleteListDir)
-    : publicDir(publicDir),deleteListDir(deleteListDir) {
-    hashCacheFile="cache/dir_hashes.json";
-    LoadHashCache();
+#ifdef _WIN32
+#include <windows.h>
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if(utf8.empty()) return L"";
+    int wlen=MultiByteToWideChar(CP_UTF8,0,utf8.c_str(),-1,nullptr,0);
+    if(wlen<=0) return L"";
+    std::wstring wstr(wlen-1,0);
+    MultiByteToWideChar(CP_UTF8,0,utf8.c_str(),-1,&wstr[0],wlen);
+    return wstr;
 }
 
-bool FileScanner::LoadHashCache() {
-    try {
-        std::ifstream file(hashCacheFile);
-        if(!file.is_open()) {
-            return false;
-        }
+static std::string WideToUtf8(const std::wstring& wide) {
+    if(wide.empty()) return "";
+    int len=WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,nullptr,0,nullptr,nullptr);
+    if(len<=0) return "";
+    std::string str(len-1,0);
+    WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,&str[0],len,nullptr,nullptr);
+    return str;
+}
+#endif
 
-        Json::Value cache;
-        Json::Reader reader;
-
-        if(reader.parse(file,cache)) {
-            const Json::Value::Members& members=cache.getMemberNames();
-            for(const auto& key:members) {
-                dirHashCache[key]=cache[key].asString();
-            }
-            return true;
-        }
-    }
-    catch(const std::exception& e) {
-        std::cerr<<"[WARN] ÎŞ·¨¼ÓÔØ¹şÏ£»º´æ: "<<e.what()<<std::endl;
-    }
-    return false;
+FileScanner::FileScanner(const std::string& workspace,const std::string& hashAlgorithm)
+    : workspace(workspace),hashAlgorithm(hashAlgorithm) {
 }
 
-bool FileScanner::SaveHashCache() {
+bool FileScanner::Scan() {
+    files.clear();
+    directories.clear();
+
+    if(!std::filesystem::exists(workspace)) {
+        g_logger<<LANG("error_scan")<<": "<<LANG("error_file_not_found")<<": "<<workspace<<std::endl;
+        return false;
+    }
+
+    g_logger<<LANG("scan_start")<<": "<<workspace<<std::endl;
+
     try {
-        fs::create_directories(fs::path(hashCacheFile).parent_path());
-
-        std::ofstream file(hashCacheFile);
-        if(!file.is_open()) {
-            return false;
-        }
-
-        Json::Value cache;
-        for(const auto& [path,hash]:dirHashCache) {
-            cache[path]=hash;
-        }
-
-        Json::StyledWriter writer;
-        file<<writer.write(cache);
-
+        ScanDirectory(workspace);
+        g_logger<<LANG("scan_complete")<<": "<<files.size()<<" files, "<<directories.size()<<" directories"<<std::endl;
         return true;
     }
     catch(const std::exception& e) {
-        std::cerr<<"[WARN] ÎŞ·¨±£´æ¹şÏ£»º´æ: "<<e.what()<<std::endl;
+        g_logger<<LANG("error_scan")<<": "<<e.what()<<std::endl;
         return false;
     }
 }
-
-std::string FileScanner::CalculateDirectoryContentHash(const std::filesystem::path& dirPath,
-    const std::string& hashAlgorithm) {
-
-    std::vector<unsigned char> combinedData;
+//FIXME: æ¯ä¸ª FileInfo åŒ…å«å®Œæ•´è·¯å¾„ã€å“ˆå¸Œã€å¤§å°ç­‰ï¼Œåœ¨ DirectoryInfo ä¸­é‡å¤å­˜å‚¨ï¼Œå¯¼è‡´å†…å­˜è†¨èƒ€ã€‚
+// è‹¥æ–‡ä»¶æ•°é‡å·¨å¤§ï¼Œå¯èƒ½æˆä¸ºç“¶é¢ˆã€‚
+void FileScanner::ScanDirectory(const std::filesystem::path& currentPath,const std::string& relativePath) {
+    DirectoryInfo dirInfo;
+    dirInfo.path=relativePath;
 
     try {
-        std::vector<std::filesystem::path> files;
-        for(const auto& entry:fs::recursive_directory_iterator(dirPath)) {
-            if(entry.is_regular_file()) {
-                files.push_back(entry.path());
+#ifdef _WIN32
+        // Windowsä¸‹ä½¿ç”¨å®½å­—ç¬¦å¤„ç†ç›®å½•éå†
+        std::wstring wCurrentPath=Utf8ToWide(currentPath.string());
+        for(const auto& entry:std::filesystem::directory_iterator(wCurrentPath)) {
+            std::string entryName=WideToUtf8(entry.path().filename().wstring());
+#else
+        for(const auto& entry:std::filesystem::directory_iterator(currentPath)) {
+            std::string entryName=entry.path().filename().string();
+#endif
+
+            std::string entryRelativePath=relativePath.empty()?
+                entryName:
+                relativePath+"/"+entryName;
+
+            entryRelativePath=NormalizePath(entryRelativePath);
+
+            if(entry.is_directory()) {
+                ScanDirectory(entry.path(),entryRelativePath);
+                dirInfo.subdirectories.push_back(entryName);
+            }
+            else if(entry.is_regular_file()) {
+                FileInfo fileInfo;
+                fileInfo.path=entryRelativePath;
+                fileInfo.size=entry.file_size();
+                fileInfo.isDirectory=false;
+
+                try {
+                    auto ftime=entry.last_write_time();
+                    auto sctp=std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                        ftime-std::filesystem::file_time_type::clock::now()+
+                        std::chrono::system_clock::now());
+                    fileInfo.modifiedTime=std::chrono::system_clock::to_time_t(sctp);
+                }
+                catch(const std::exception& e) {
+                    g_logger<<LANG("error_time_conversion")<<": "<<e.what()<<std::endl;
+                    fileInfo.modifiedTime=0;
+                }
+
+                // è®¡ç®—æ–‡ä»¶å“ˆå¸Œï¼ˆä½¿ç”¨å®Œæ•´è·¯å¾„ï¼‰
+                std::string fullPath=currentPath.string()+"/"+entryName;
+				//FIXME: è‹¥ CalculateFileHash è¿”å›ç©ºå­—ç¬¦ä¸²ï¼ˆå¦‚æ–‡ä»¶æ— æ³•æ‰“å¼€ï¼‰ï¼ŒfileInfo.hash ä¸ºç©ºï¼Œè¯¥æ–‡ä»¶ä»è¢«åŠ å…¥åˆ—è¡¨ã€‚
+                // åç»­å·®å¼‚è®¡ç®—å¯èƒ½è¯¯è®¤ä¸ºè¯¥æ–‡ä»¶å†…å®¹ä¸ºç©ºå“ˆå¸Œï¼Œå¯¼è‡´é”™è¯¯ã€‚
+                fileInfo.hash=CalculateFileHash(fullPath,hashAlgorithm);
+
+                files.push_back(fileInfo);
+                dirInfo.files.push_back(fileInfo);
             }
         }
-        std::sort(files.begin(),files.end());
 
-        for(const auto& filePath:files) {
-            std::string relativePath=fs::relative(filePath,dirPath).string();
-            std::replace(relativePath.begin(),relativePath.end(),'\\','/');
-
-            for(char c:relativePath) {
-                combinedData.push_back(static_cast<unsigned char>(c));
-            }
+        if(!dirInfo.path.empty()||(!dirInfo.files.empty()||!dirInfo.subdirectories.empty())) {
+            directories.push_back(dirInfo);
         }
+        }
+    catch(const std::filesystem::filesystem_error& e) {
+        g_logger<<LANG("error_scan")<<": "<<e.what()<<std::endl;
     }
-    catch(const std::exception& e) {
-        std::cerr<<"[ERROR] ¼ÆËãÄ¿Â¼¹şÏ£Ê±³ö´í: "<<dirPath<<" - "<<e.what()<<std::endl;
+    }
+
+std::string FileScanner::CalculateFileHash(const std::string& filePath,const std::string& algorithm) {
+#ifdef _WIN32
+    // Windowsä¸‹ä½¿ç”¨å®½å­—ç¬¦APIç¡®ä¿ä¸­æ–‡è·¯å¾„æ­£ç¡®
+    std::wstring wFilePath=Utf8ToWide(filePath);
+    FILE* file=_wfopen(wFilePath.c_str(),L"rb");
+#else
+    FILE* file=fopen(filePath.c_str(),"rb");
+#endif
+
+    if(!file) {
         return "";
     }
 
-    return FileHasher::CalculateMemoryHash(combinedData,hashAlgorithm);
-}
+    const size_t bufferSize=8192;
+    char buffer[bufferSize];
 
-void FileScanner::SetHashCacheFile(const std::string& cacheFile) {
-    hashCacheFile=cacheFile;
-    LoadHashCache();
-}
-
-Json::Value FileScanner::ScanFiles(const std::string& baseUrl,const std::string& hashAlgorithm) {
-    Json::Value result;
-    Json::Value files(Json::arrayValue);
-    Json::Value directories(Json::arrayValue);
-
-    try {
-        std::cout<<"[INFO] É¨ÃèÄ¿Â¼: "<<publicDir<<std::endl;
-        ScanDirectory(fs::path(publicDir),"",files,directories,baseUrl,hashAlgorithm);
-        std::cout<<"[INFO] Ä¿Â¼É¨ÃèÍê³É"<<std::endl;
-
-        SaveHashCache();
-    }
-    catch(const std::exception& e) {
-        std::cerr<<"[ERROR] É¨ÃèÄ¿Â¼Òì³£: "<<e.what()<<std::endl;
-        g_logger<<"[ERROR]É¨ÃèÄ¿Â¼Òì³£: "<<e.what()<<std::endl;
-    }
-
-    result["files"]=files;
-    result["directories"]=directories;
-    return result;
-}
-
-Json::Value FileScanner::GenerateDeleteList() {
-    Json::Value deleteList(Json::arrayValue);
-
-    try {
-        std::cout<<"[INFO] Éú³ÉÉ¾³ıÁĞ±í..."<<std::endl;
-        for(const auto& entry:fs::directory_iterator(deleteListDir)) {
-            if(entry.is_regular_file()) {
-                std::cout<<"[INFO] ¶ÁÈ¡É¾³ıÁĞ±íÎÄ¼ş: "<<entry.path().filename().string()<<std::endl;
-                std::ifstream file(entry.path());
-                std::string line;
-                while(std::getline(file,line)) {
-                    if(!line.empty()) {
-                        deleteList.append(line);
-                        std::cout<<"[INFO] Ìí¼Ó´ıÉ¾³ıÎÄ¼ş: "<<line<<std::endl;
-                    }
-                }
-                file.close();
-            }
-        }
-        std::cout<<"[INFO] É¾³ıÁĞ±íÉú³ÉÍê³É£¬¹² "<<deleteList.size()<<" ¸öÎÄ¼ş"<<std::endl;
-    }
-    catch(const std::exception& e) {
-        std::cerr<<"[ERROR] Éú³ÉÉ¾³ıÁĞ±íÒì³£: "<<e.what()<<std::endl;
-        g_logger<<"[ERROR]Éú³ÉÉ¾³ıÁĞ±íÒì³£: "<<e.what()<<std::endl;
-    }
-
-    return deleteList;
-}
-
-void FileScanner::ScanDirectory(const fs::path& dirPath,const std::string& relativePath,
-    Json::Value& files,Json::Value& directories,
-    const std::string& baseUrl,const std::string& hashAlgorithm) {
-
-    try {
-        if(!fs::exists(dirPath)) {
-            std::cerr<<"[ERROR] É¨ÃèÄ¿Â¼²»´æÔÚ: "<<dirPath<<std::endl;
-            return;
+    if(algorithm=="md5") {
+        MD5_CTX context;
+        MD5_Init(&context);
+		//FIXME: fread å¯èƒ½å› é”™è¯¯è¿”å› 0ï¼Œæ­¤æ—¶ ferror(file) ä¸ºçœŸï¼Œä½†ä»£ç æœªæ£€æŸ¥ï¼Œå¯¼è‡´å“ˆå¸ŒåŸºäºéƒ¨åˆ†æ•°æ®è®¡ç®—ï¼Œç»“æœé”™è¯¯ã€‚
+        size_t bytesRead;
+        while((bytesRead=fread(buffer,1,bufferSize,file))>0) {
+            MD5_Update(&context,buffer,bytesRead);
         }
 
-        for(const auto& entry:fs::directory_iterator(dirPath)) {
-            if(!fs::exists(entry.path())) {
-                std::cerr<<"[WARN] Ìø¹ıÎŞĞ§ÌõÄ¿: "<<entry.path()<<std::endl;
-                continue;
-            }
+        unsigned char digest[MD5_DIGEST_LENGTH];
+        MD5_Final(digest,&context);
 
-            std::string filename=entry.path().filename().string();
-            std::string currentRelativePath=relativePath.empty()?filename:relativePath+"/"+filename;
-
-            if(entry.is_regular_file()&&entry.path().extension()==".zip") {
-                std::string dirName=entry.path().stem().string();
-                fs::path potentialDirPath=entry.path().parent_path()/dirName;
-
-                if(fs::exists(potentialDirPath)&&fs::is_directory(potentialDirPath)) {
-                    std::cout<<"[INFO] Ìø¹ıÄ¿Â¼ZIPÎÄ¼ş: "<<currentRelativePath<<std::endl;
-                    continue;
-                }
-            }
-
-            if(entry.is_regular_file()) {
-                std::cout<<"[INFO] É¨ÃèÎÄ¼ş: "<<currentRelativePath<<std::endl;
-
-                try {
-                    Json::Value fileInfo;
-                    fileInfo["path"]=currentRelativePath;
-                    fileInfo["url"]=baseUrl+currentRelativePath;
-                    fileInfo["type"]="file";
-                    fileInfo["hash"]=FileHasher::CalculateFileHash(entry.path().string(),hashAlgorithm);
-
-                    files.append(fileInfo);
-                    g_logger<<"[INFO] É¨ÃèÎÄ¼ş: "<<currentRelativePath<<std::endl;
-                }
-                catch(const std::exception& e) {
-                    std::cerr<<"[ERROR] ´¦ÀíÎÄ¼şÊ§°Ü: "<<currentRelativePath<<" - "<<e.what()<<std::endl;
-                }
-            }
-            else if(entry.is_directory()) {
-                std::cout<<"[INFO] É¨ÃèÄ¿Â¼: "<<currentRelativePath<<std::endl;
-
-                std::string zipFilename=currentRelativePath+".zip";
-                std::string zipPath=publicDir+"/"+zipFilename;
-
-                bool zipExists=fs::exists(zipPath);
-
-                std::string currentHash=CalculateDirectoryContentHash(entry.path(),hashAlgorithm);
-                std::string cachedHash=dirHashCache[currentRelativePath];
-
-                bool needCreateZip=true;
-
-                if(zipExists&&!currentHash.empty()&&currentHash==cachedHash) {
-                    std::cout<<"[INFO] Ä¿Â¼Î´±ä»¯£¬Ê¹ÓÃÏÖÓĞZIPÎÄ¼ş: "<<currentRelativePath
-                        <<" ¹şÏ£: "<<currentHash.substr(0,8)<<std::endl;
-                    needCreateZip=false;
-                }
-                else {
-                    if(!zipExists) {
-                        std::cout<<"[INFO] ZIPÎÄ¼ş²»´æÔÚ£¬ĞèÒª´´½¨: "<<currentRelativePath<<std::endl;
-                    }
-                    else if(currentHash.empty()) {
-                        std::cout<<"[INFO] ÎŞ·¨¼ÆËãÄ¿Â¼¹şÏ££¬ÖØĞÂ´´½¨ZIP: "<<currentRelativePath<<std::endl;
-                    }
-                    else {
-                        std::cout<<"[INFO] Ä¿Â¼ÒÑ±ä»¯£¬ÖØĞÂ´´½¨ZIP: "<<currentRelativePath
-                            <<" (¾É¹şÏ£: "<<(cachedHash.empty()?"ÎŞ":cachedHash.substr(0,8))
-                            <<", ĞÂ¹şÏ£: "<<currentHash.substr(0,8)<<")"<<std::endl;
-                    }
-                }
-
-                try {
-                    if(needCreateZip) {
-                        bool success=ZipManager::CreateZipFromDirectory(entry.path().string(),zipPath);
-                        if(success) {
-                            dirHashCache[currentRelativePath]=currentHash;
-                            std::cout<<"[INFO] ÒÑ¸üĞÂÄ¿Â¼¹şÏ£»º´æ: "<<currentRelativePath
-                                <<" -> "<<currentHash.substr(0,8)<<std::endl;
-                        }
-                        else {
-                            std::cerr<<"[ERROR] ´´½¨ZIPÎÄ¼şÊ§°Ü£¬Ìø¹ıÄ¿Â¼: "<<currentRelativePath<<std::endl;
-                            continue;
-                        }
-                    }
-                    else {
-                        dirHashCache[currentRelativePath]=currentHash;
-                    }
-
-                    Json::Value dirInfo;
-                    dirInfo["path"]=currentRelativePath;
-                    dirInfo["url"]=baseUrl+zipFilename;
-                    dirInfo["hash"]=currentHash;
-
-                    Json::Value contents(Json::arrayValue);
-                    int contentCount=0;
-
-                    try {
-                        for(const auto& subEntry:fs::recursive_directory_iterator(entry.path())) {
-                            if(subEntry.is_regular_file()&&fs::exists(subEntry.path())) {
-                                std::string subRelativePath=fs::relative(subEntry.path(),entry.path()).string();
-                                std::replace(subRelativePath.begin(),subRelativePath.end(),'\\','/');
-
-                                Json::Value contentInfo;
-                                contentInfo["path"]=subRelativePath;
-                                contentInfo["hash"]=FileHasher::CalculateFileHash(subEntry.path().string(),hashAlgorithm);
-
-                                contents.append(contentInfo);
-                                contentCount++;
-                            }
-                        }
-                    }
-                    catch(const std::exception& e) {
-                        std::cerr<<"[ERROR] É¨ÃèÄ¿Â¼ÄÚÈİÊ§°Ü: "<<entry.path()<<" - "<<e.what()<<std::endl;
-                    }
-
-                    dirInfo["contents"]=contents;
-                    directories.append(dirInfo);
-                    std::cout<<"[INFO] Ä¿Â¼´¦ÀíÍê³É: "<<currentRelativePath<<" (°üº¬ "<<contentCount<<" ¸öÎÄ¼ş)"<<std::endl;
-                }
-                catch(const std::exception& e) {
-                    std::cerr<<"[ERROR] ´¦ÀíÄ¿Â¼Òì³£: "<<currentRelativePath<<" - "<<e.what()<<std::endl;
-                }
-            }
+        std::stringstream ss;
+        for(int i=0; i<MD5_DIGEST_LENGTH; ++i) {
+            ss<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)digest[i];
         }
+
+        fclose(file);
+        return ss.str();
     }
-    catch(const std::exception& e) {
-        std::cerr<<"[ERROR] É¨ÃèÄ¿Â¼¹ı³ÌÖĞ·¢ÉúÒì³£: "<<dirPath<<" - "<<e.what()<<std::endl;
-        g_logger<<"[ERROR] É¨ÃèÄ¿Â¼¹ı³ÌÖĞ·¢ÉúÒì³£: "<<dirPath<<" - "<<e.what()<<std::endl;
+    else if(algorithm=="sha1") {
+        SHA_CTX context;
+        SHA1_Init(&context);
+
+        size_t bytesRead;
+        while((bytesRead=fread(buffer,1,bufferSize,file))>0) {
+            SHA1_Update(&context,buffer,bytesRead);
+        }
+
+        unsigned char digest[SHA_DIGEST_LENGTH];
+        SHA1_Final(digest,&context);
+
+        std::stringstream ss;
+        for(int i=0; i<SHA_DIGEST_LENGTH; ++i) {
+            ss<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)digest[i];
+        }
+
+        fclose(file);
+        return ss.str();
     }
+    else if(algorithm=="sha256") {
+        SHA256_CTX context;
+        SHA256_Init(&context);
+
+        size_t bytesRead;
+        while((bytesRead=fread(buffer,1,bufferSize,file))>0) {
+            SHA256_Update(&context,buffer,bytesRead);
+        }
+
+        // ç‰¹åˆ«å¤„ç†ç©ºæ–‡ä»¶
+		//OPTIMIZE: ç©ºæ–‡ä»¶å¤„ç†å¯ä¼˜åŒ–,ä¸å¿…è¦çš„åˆå§‹åŒ–ã€‚
+        if(ftell(file)==0) {
+            // ç©ºæ–‡ä»¶çš„SHA256æ˜¯å›ºå®šçš„
+            static const std::string emptyFileSha256=
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            fclose(file);
+            return emptyFileSha256;
+        }
+
+        unsigned char digest[SHA256_DIGEST_LENGTH];
+        SHA256_Final(digest,&context);
+
+        std::stringstream ss;
+        for(int i=0; i<SHA256_DIGEST_LENGTH; ++i) {
+            ss<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)digest[i];
+        }
+
+        fclose(file);
+        return ss.str();
+    }
+
+    fclose(file);
+    return "";
+}
+
+std::string FileScanner::NormalizePath(const std::string& path) const {
+    std::string normalized=path;
+#ifdef _WIN32
+    std::replace(normalized.begin(),normalized.end(),'\\','/');
+#endif
+    return normalized;
+}
+
+bool FileScanner::LoadFromJson(const Json::Value& json) {
+    files.clear();
+    directories.clear();
+
+    if(!json.isMember("files")||!json.isMember("directories")) {
+        return false;
+    }
+
+    // åŠ è½½æ–‡ä»¶
+	//FIXME: è¿™é‡Œæ²¡æœ‰æ ¡éªŒ JSON ç»“æ„çš„å®Œæ•´æ€§å’Œæ­£ç¡®æ€§ï¼Œè­¬å¦‚ç¼ºå¤±å­—æ®µæˆ–ç±»å‹é”™è¯¯å¯èƒ½å¯¼è‡´å¼‚å¸¸æˆ–é”™è¯¯
+    const Json::Value& filesJson=json["files"];
+    for(const auto& fileJson:filesJson) {
+        FileInfo file;
+        file.path=fileJson["path"].asString();
+        file.hash=fileJson["hash"].asString();
+        file.size=fileJson["size"].asUInt64();
+        file.isDirectory=fileJson["is_directory"].asBool();
+        file.modifiedTime=fileJson["modified_time"].asUInt64();
+        files.push_back(file);
+    }
+
+    // åŠ è½½ç›®å½•
+    const Json::Value& dirsJson=json["directories"];
+    for(const auto& dirJson:dirsJson) {
+        DirectoryInfo dir;
+        dir.path=dirJson["path"].asString();
+
+        const Json::Value& dirFilesJson=dirJson["files"];
+        for(const auto& fileJson:dirFilesJson) {
+            FileInfo file;
+            file.path=fileJson["path"].asString();
+            file.hash=fileJson["hash"].asString();
+            file.size=fileJson["size"].asUInt64();
+            file.isDirectory=false;
+            file.modifiedTime=fileJson["modified_time"].asUInt64();
+            dir.files.push_back(file);
+        }
+
+        const Json::Value& subdirsJson=dirJson["subdirectories"];
+        for(const auto& subdirJson:subdirsJson) {
+            dir.subdirectories.push_back(subdirJson.asString());
+        }
+
+        directories.push_back(dir);
+    }
+
+    return true;
+}
+
+Json::Value FileScanner::ToJson() const {
+    Json::Value json;
+
+    Json::Value filesJson(Json::arrayValue);
+    for(const auto& file:files) {
+        filesJson.append(file.ToJson());
+    }
+    json["files"]=filesJson;
+
+    Json::Value dirsJson(Json::arrayValue);
+    for(const auto& dir:directories) {
+        dirsJson.append(dir.ToJson());
+    }
+    json["directories"]=dirsJson;
+
+    return json;
 }
