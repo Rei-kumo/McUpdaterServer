@@ -64,6 +64,7 @@ void Language::LoadChinese() {
         {"error_delete_morefiles","无法删除多余的包文件: "},
         {"error_create_pathpackage","创建目录包失败: "},
         {"error_version_small","新版本号必须大于所有现有版本"},
+        {"error_close_package","无法关闭更新包: "},
 
         // 状态消息
         {"status_idle","空闲"},
@@ -175,6 +176,7 @@ void Language::LoadEnglish() {
         {"error_delete_morefiles","Failed to delete redundant package files: "},
         {"error_create_pathpackage","Failed to create directory package:  "},
         {"error_version_small","The new version number must be greater than all existing versions"},
+        {"error_close_package","Unable to close the update package: "},
 
         // Status messages
         {"status_idle","Idle"},

@@ -5,27 +5,6 @@
 #include <filesystem>
 #include <cstring>
 #include "Logger.h"
-//FIXME：zip_close 返回值未检查，zip_error_t 未包含
-#ifdef _WIN32
-#include <windows.h>
-static std::wstring Utf8ToWide(const std::string& utf8) {
-    if(utf8.empty()) return L"";
-    int wlen=MultiByteToWideChar(CP_UTF8,0,utf8.c_str(),-1,nullptr,0);
-    if(wlen<=0) return L"";
-    std::wstring wstr(wlen-1,0);
-    MultiByteToWideChar(CP_UTF8,0,utf8.c_str(),-1,&wstr[0],wlen);
-    return wstr;
-}
-
-static std::string WideToUtf8(const std::wstring& wide) {
-    if(wide.empty()) return "";
-    int len=WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,nullptr,0,nullptr,nullptr);
-    if(len<=0) return "";
-    std::string str(len-1,0);
-    WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,&str[0],len,nullptr,nullptr);
-    return str;
-}
-#endif
 bool PackageBuilder::CreateIncrementalPackage(
     const std::string& oldVersion,
     const std::string& newVersion,
@@ -69,11 +48,14 @@ bool PackageBuilder::CreateIncrementalPackage(
         }
     }
 
-    zip_close(zip);
+    if(zip_close(zip)<0) {
+        zip_error_t* error=zip_get_error(zip);
+        g_logger<<LANG("error_close_package")<<": "<<zip_error_strerror(error)<<std::endl;
+        return false;
+    }
     std::cout<<LANG("package_complete")<<outputPath<<std::endl;
     return true;
 }
-//FIXME:未检查文件存在性
 bool PackageBuilder::CreateFullPackage(
     const std::string& version,
     const std::vector<FileInfo>& files,
@@ -133,7 +115,11 @@ bool PackageBuilder::CreateFullPackage(
         }
     }
 
-    zip_close(zip);
+    if(zip_close(zip)<0) {
+        zip_error_t* error=zip_get_error(zip);
+        g_logger<<LANG("error_close_package")<<": "<<zip_error_strerror(error)<<std::endl;
+        return false;
+    }
     std::cout<<LANG("package_complete")<<outputPath<<std::endl;
     return true;
 }
@@ -168,7 +154,7 @@ bool PackageBuilder::CreateDirectoryPackage(
         // 子目录包：递归打包整个目录树
         std::string physicalRoot=workspace+"/"+rootDir;
         if(std::filesystem::exists(physicalRoot)) {
-            if(!AddDirectoryRecursively(zip,physicalRoot,rootDir,workspace)) {
+            if(!AddDirectoryRecursively(zip,physicalRoot,rootDir)) {
                 zip_close(zip);
                 return false;
             }
@@ -178,12 +164,15 @@ bool PackageBuilder::CreateDirectoryPackage(
         }
     }
 
-    zip_close(zip);
+    if(zip_close(zip)<0) {
+        zip_error_t* error=zip_get_error(zip);
+        g_logger<<LANG("error_close_package")<<": "<<zip_error_strerror(error)<<std::endl;
+        return false;
+    }
     return true;
 }
-//FIXME: Workspace参数好像没用到
-bool PackageBuilder::AddDirectoryRecursively(zip_t* zip,const std::string& physicalPath,const std::string& zipPath,const std::string& workspace) {
-    // 添加当前目录条目（如果 zipPath 非空）
+
+bool PackageBuilder::AddDirectoryRecursively(zip_t* zip,const std::string& physicalPath,const std::string& zipPath) {
     if(!zipPath.empty()) {
         zip_dir_add(zip,zipPath.c_str(),ZIP_FL_ENC_UTF_8);
     }
@@ -207,7 +196,7 @@ bool PackageBuilder::AddDirectoryRecursively(zip_t* zip,const std::string& physi
 
         if(entry.is_directory()) {
             // 递归添加子目录
-            if(!AddDirectoryRecursively(zip,entryPhysical,entryZip,workspace)) {
+            if(!AddDirectoryRecursively(zip,entryPhysical,entryZip)) {
                 return false;
             }
         }
@@ -220,7 +209,8 @@ bool PackageBuilder::AddDirectoryRecursively(zip_t* zip,const std::string& physi
     }
     return true;
 }
-
+/*
+//目前无用，之后修复，以后可能会用
 bool PackageBuilder::AddDirectoryToZip(
     zip_t* zip,
     const std::string& dirPath,
@@ -268,6 +258,7 @@ bool PackageBuilder::AddDirectoryToZip(
 
     return true;
 }
+*/
 
 bool PackageBuilder::AddEmptyDirectoryMarker(zip_t* zip,const std::string& dirPath) {
     std::string markerContent=LANG("info_empty_directory")+std::string(" ")+dirPath+"\n";
@@ -278,8 +269,6 @@ bool PackageBuilder::AddEmptyDirectoryMarker(zip_t* zip,const std::string& dirPa
     else {
         zipPath=dirPath+"/.empty_dir_marker";
     }
-	//FIXME: 好像没有用
-    std::replace(zipPath.begin(),zipPath.end(),'\\','/');
 
     zip_source_t* source=zip_source_buffer(zip,markerContent.c_str(),markerContent.length(),0);
     if(!source) {
@@ -324,34 +313,13 @@ bool PackageBuilder::AddFileToZip(zip_t* zip,const std::string& filePath,const s
         normalizedZipPath=normalizedZipPath.substr(1);
     }
 
-#ifdef _WIN32
-    std::wstring wFilePath=Utf8ToWide(filePath);
-    FILE* file=_wfopen(wFilePath.c_str(),L"rb");
-#else
-    FILE* file=fopen(filePath.c_str(),"rb");
-#endif
+    zip_source_t* source=nullptr;
 
-    if(!file) {
-        g_logger<<LANG("error_open_file")<<": "<<filePath<<std::endl;
-        return false;
-    }
-	//FIXME: 这里对于大文件会分配等大内存，可能导致内存不足或性能下降。
-    fseek(file,0,SEEK_END);
-    long fileSize=ftell(file);
-    fseek(file,0,SEEK_SET);
+	source=zip_source_file_create(filePath.c_str(),0,0,nullptr);
 
-    std::vector<char> buffer(fileSize);
-    size_t bytesRead=fread(buffer.data(),1,fileSize,file);
-    fclose(file);
-
-    if(bytesRead!=static_cast<size_t>(fileSize)) {
-        g_logger<<LANG("error_read_file")<<": "<<filePath<<std::endl;
-        return false;
-    }
-
-    zip_source_t* source=zip_source_buffer(zip,buffer.data(),buffer.size(),0);
     if(!source) {
-        g_logger<<LANG("error_zip_source")<<": "<<filePath<<std::endl;
+		zip_error_t* error=zip_get_error(zip);
+        g_logger<<LANG("error_zip_source")<<": "<<filePath<<"-"<<zip_error_strerror(error)<<std::endl;
         return false;
     }
 
@@ -363,18 +331,5 @@ bool PackageBuilder::AddFileToZip(zip_t* zip,const std::string& filePath,const s
         return false;
     }
 
-    return true;
-}
-//FIXME: 空目录标记应该更为特别
-bool PackageBuilder::CreateEmptyDirMarker(const std::string& dirPath,const std::string& tempPath) {
-    std::filesystem::create_directories(tempPath);
-    std::string markerFile=tempPath+"/.empty_dir_marker";
-    std::ofstream marker(markerFile);
-    if(!marker) {
-        g_logger<<LANG("error_create_marker")<<markerFile<<std::endl;
-        return false;
-    }
-    marker<<LANG("info_empty_directory")<<dirPath<<std::endl;
-    marker.close();
     return true;
 }
